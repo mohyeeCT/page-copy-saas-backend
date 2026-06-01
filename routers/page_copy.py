@@ -20,6 +20,7 @@ from utils.scraper import (
     is_editorial_competitor,
 )
 from utils.templates import get_template, get_templates_for_page_type, parse_custom_template
+from utils.niches import get_niche_context
 from utils.copy_gen import generate_page, sanitise
 from utils.docx_export import build_docx
 
@@ -102,6 +103,9 @@ def _process_single_row(
     min_volume   = settings.get("min_volume", 10)
     location_code = settings.get("location_code", 2840)
     client_brief = settings.get("client_brief", "")
+    _niche_ctx = get_niche_context(settings.get("niche", ""))
+    if _niche_ctx:
+        client_brief = (client_brief + "\n\n" + _niche_ctx).strip()
 
     # Inject brand profile into brief
     if brand_profile:
@@ -419,6 +423,7 @@ class PageCopyRow(BaseModel):
 
 
 class PageCopySettings(BaseModel):
+    niche: str = ""
     provider: str = "Claude"
     api_key: str = ""
     dfs_login: str = ""
