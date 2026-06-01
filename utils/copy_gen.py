@@ -1,309 +1,299 @@
-import anthropic
-import openai
-from google import genai as google_genai
-from mistralai import Mistral
-from groq import Groq
+import re
+import time
+import json
 
 
-def _sanitise(text: str, brand_name: str = "") -> str:
-    """
-    Post-process AI output to enforce hard formatting rules
-    regardless of what the model returns.
-    - Replaces em dash with comma+space
-    - Replaces en dash separator with pipe
-    - Strips surrounding quotes the model sometimes adds
-    - Restores exact brand name casing if model changed it
-    """
+# ── Sanitiser ─────────────────────────────────────────────────────────────────
+
+def sanitise(text: str, brand_name: str = "") -> str:
+    """Strip em dashes, fix brand casing, remove surrounding quotes."""
     if not text:
-        return text
-    import re
-    text = re.sub(r'\s*—\s*', ', ', text)
-    text = re.sub(r' – ', ' | ', text)
-    text = text.strip('"').strip("'")
-    if brand_name and brand_name.strip():
-        text = re.sub(
-            re.escape(brand_name.strip()),
-            brand_name.strip(),
-            text,
-            flags=re.IGNORECASE
-        )
-    return text.strip()
+        return ""
+    text = text.replace("\u2014", ",").replace("\u2013 ", ", ")
+    text = text.strip().strip('"').strip("'").strip()
+    if brand_name:
+        text = re.sub(re.escape(brand_name), brand_name, text, flags=re.IGNORECASE)
+    return text
 
 
-# Business type guidance injected into prompts
+# ── Business type context ─────────────────────────────────────────────────────
+
 BUSINESS_TYPE_CONTEXT = {
-    "b2b": {
-        "buyer": "procurement managers, R&D teams, and business buyers",
-        "intent": "evaluating suppliers, sourcing products, or requesting quotes",
-        "tone": "professional, specific, and credibility-focused",
-        "cta_examples": "Request a sample, Get specifications, Contact our team, Request a quote",
-        "avoid": "consumer-facing CTAs like Shop Now or Buy Today",
-        "title_pattern": "lead with the product/service capability, end with brand",
-        "desc_pattern": "lead with what you supply or manufacture, include a B2B-specific CTA"
-    },
-    "b2c": {
-        "buyer": "individual consumers",
-        "intent": "researching, comparing, or ready to purchase",
-        "tone": "direct, benefit-driven, and engaging",
-        "cta_examples": "Shop now, Explore the range, Find yours, Order today",
-        "avoid": "jargon, overly technical language",
-        "title_pattern": "lead with the product benefit or keyword, end with brand",
-        "desc_pattern": "highlight the key benefit, create urgency or desire, end with CTA"
-    },
-    "ecommerce": {
-        "buyer": "online shoppers",
-        "intent": "browsing products, comparing options, ready to buy",
-        "tone": "punchy, benefit-focused, conversion-oriented",
-        "cta_examples": "Shop now, Browse the collection, Order today, Free shipping",
-        "avoid": "vague descriptions with no product specifics",
-        "title_pattern": "product name or category first, include a differentiator if space allows, end with brand",
-        "desc_pattern": "lead with the product, include a key benefit, end with action-oriented CTA"
-    },
-    "service": {
-        "buyer": "people looking for professional help or a solution to a problem",
-        "intent": "evaluating providers, understanding what a service includes, or ready to contact",
-        "tone": "confident, outcome-focused, and trustworthy",
-        "cta_examples": "Get a free quote, Book a consultation, Talk to an expert, Get started",
-        "avoid": "vague fluff like world-class or industry-leading",
-        "title_pattern": "lead with the service outcome or what you do, include location if local, end with brand",
-        "desc_pattern": "state what you do and who you help, include a benefit, end with a direct CTA"
-    },
-    "local": {
-        "buyer": "local searchers with high purchase or visit intent",
-        "intent": "finding a nearby provider, checking hours or location, ready to call or visit",
-        "tone": "direct, local, and action-oriented",
-        "cta_examples": "Call us today, Visit our showroom, Get directions, Book an appointment",
-        "avoid": "national/generic copy with no local relevance",
-        "title_pattern": "service + location + brand",
-        "desc_pattern": "mention the city or area, include what you offer, end with a local-specific CTA"
-    },
-    "general": {
-        "buyer": "general web visitors",
-        "intent": "informational or navigational",
-        "tone": "clear and informative",
-        "cta_examples": "Learn more, Explore, Find out more",
-        "avoid": "overly salesy language for informational pages",
-        "title_pattern": "topic first, brand last",
-        "desc_pattern": "summarize what the page covers clearly, include a soft CTA"
-    }
+    "b2b": (
+        "This page is for a B2B business targeting other businesses. "
+        "Tone: professional and direct. Focus on ROI, efficiency, and business outcomes. "
+        "No consumer-facing CTAs. No exclamation marks. No lifestyle language."
+    ),
+    "b2c": (
+        "This page is for a B2C business targeting consumers. "
+        "Tone: warm, accessible, and benefit-focused. "
+        "CTAs can reference product benefits and lifestyle outcomes."
+    ),
+    "ecommerce": (
+        "This page is for an ecommerce business. "
+        "Tone: direct and product-focused. "
+        "Copy should support purchase decisions. Avoid vague editorial tone."
+    ),
+    "service": (
+        "This page is for a service business. "
+        "Tone: helpful and trustworthy. Focus on expertise, process, and outcomes. "
+        "CTAs should invite contact or consultation."
+    ),
+    "local": (
+        "This page is for a local service business. "
+        "Tone: community-oriented and accessible. "
+        "Reference the service area where natural. CTAs should invite calls or visits."
+    ),
+    "general": (
+        "This page is for a general business. "
+        "Tone: clear and professional. Adapt language to the page context."
+    ),
 }
 
 
-TITLE_PROMPT = """You are a senior SEO copywriter with deep knowledge of how different business types require different copy strategies.
+# ── Prompt builder ────────────────────────────────────────────────────────────
 
-Write a title tag for the following page.
+def _build_section_prompt(
+    section: dict,
+    primary_keyword: str,
+    supporting_keyword: str,
+    lsi_keywords: list,
+    business_type: str,
+    brand_name: str,
+    h1: str,
+    page_type: str,
+    paa_questions: list,
+    competitor_excerpts: list,
+    client_brief: str,
+    previous_section_text: str,
+    client_existing_content: str,
+    ai_overview: str = "",
+) -> str:
+    kw_slot = section.get("keyword_slot", "none")
+    wc_min, wc_max = section.get("word_count", [150, 250])
 
-Hard rules:
-- Maximum 60 characters. Count carefully. This is a strict limit.
-- Include the target keyword naturally, ideally near the start
-- No all-caps, excessive punctuation, or clickbait
-- No padding or filler words
-- Never use em dashes (—) anywhere in the output
-- If brand name is provided, append it at the end after a pipe character
-- Use the brand name EXACTLY as provided, preserving capitalisation and full name (e.g. "DSB Law Firm" not "dsb" or "DSB")
-- Return ONLY the title tag text. No explanation, no quotes, no extra text.
+    if kw_slot == "primary":
+        keyword_instruction = f"Include this keyword naturally: {primary_keyword}" if primary_keyword else ""
+    elif kw_slot == "supporting":
+        keyword_instruction = f"Include this keyword naturally: {supporting_keyword}" if supporting_keyword else ""
+    elif kw_slot == "lsi":
+        lsi_str = ", ".join(lsi_keywords[:3]) if lsi_keywords else ""
+        keyword_instruction = f"Naturally cover these related terms where relevant: {lsi_str}" if lsi_str else ""
+    else:
+        keyword_instruction = ""
 
-Business context:
-- Business type: {business_type}
-- Target buyer: {buyer}
-- Buyer intent: {intent}
-- Recommended title pattern: {title_pattern}
-- Avoid: {avoid}
+    paa_block = ""
+    if paa_questions and section["name"] == "faq":
+        paa_lines = "\n".join(f"- {q['question']}" for q in paa_questions[:5])
+        paa_block = f"\nPeople Also Ask questions to draw from:\n{paa_lines}"
 
-Page details:
-- URL: {url}
-- Page type: {page_type}
-- Target keyword: {keyword}
-- Brand name: {brand_name}
-- Current H1 (use as topic signal for what this page is actually about): {h1}
-- Forbidden phrases: {forbidden_phrases}
-- Additional context: {context}
+    competitor_block = ""
+    if competitor_excerpts:
+        excerpts = "\n".join(f"- {e}" for e in competitor_excerpts[:3] if e.strip())
+        if excerpts:
+            competitor_block = f"\nWhat competitors cover in this section (use as context, not as copy):\n{excerpts}"
 
-Important: The H1 tells you the current page topic. Use it to ensure the title tag reflects the actual page content and differentiates product variations from each other."""
+    existing_block = ""
+    if client_existing_content and client_existing_content.strip():
+        existing_block = f"\nClient's existing content on this topic (extract useful facts or claims, do not copy):\n{client_existing_content[:400]}"
 
+    brief_block = ""
+    if client_brief and client_brief.strip():
+        brief_block = f"\nClient brief notes:\n{client_brief[:300]}"
 
-DESCRIPTION_PROMPT = """You are a senior SEO copywriter with deep knowledge of how different business types require different copy strategies.
+    prev_block = ""
+    if previous_section_text and previous_section_text.strip():
+        prev_block = f"\nPrevious section (for context and coherence, do not repeat):\n{previous_section_text[-300:]}"
 
-Write a meta description for the following page.
+    heading_instruction = ""
+    heading_level = section.get("heading_level", "h2")
+    if heading_level == "h2":
+        heading_instruction = f"Start with an H2 heading (## in markdown). The heading should reflect the section purpose."
+    elif heading_level == "h3":
+        heading_instruction = f"Use H3 subheadings (### in markdown) where appropriate."
+    elif heading_level == "h1":
+        heading_instruction = "Start with the H1 headline (# in markdown)."
+    else:
+        heading_instruction = "Do not add a heading. Write body copy only."
 
-Hard rules:
-- Maximum 155 characters. Count carefully. This is a strict limit.
-- Include the target keyword naturally
-- Do not duplicate the title tag
-- No all-caps, excessive punctuation, or clickbait
-- Never use em dashes (—) anywhere in the output. Use a comma or rewrite the sentence instead.
-- Use the brand name EXACTLY as provided, preserving capitalisation and full name
-- Return ONLY the meta description text. No explanation, no quotes, no extra text.
+    ai_overview_block = ""
+    if ai_overview and ai_overview.strip():
+        ai_overview_block = f"\nGoogle AI Overview for this topic (use as reference for what topics to cover, do not copy):\n{ai_overview[:600]}"
 
-Business context:
-- Business type: {business_type}
-- Target buyer: {buyer}
-- Buyer intent: {intent}
-- Recommended tone: {tone}
-- Good CTA examples for this type: {cta_examples}
-- Recommended description pattern: {desc_pattern}
-- Avoid: {avoid}
+    prompt = f"""You are writing the '{section['label']}' section of a {page_type} page.
 
-Page details:
-- URL: {url}
-- Page type: {page_type}
-- Target keyword: {keyword}
-- Brand name: {brand_name}
-- Current H1 (use as topic signal for what this page is actually about): {h1}
-- Forbidden phrases: {forbidden_phrases}
-- Additional context: {context}
+Page H1: {h1 or 'Not provided'}
+Brand name: {brand_name or 'Not specified'}
+Business context: {BUSINESS_TYPE_CONTEXT.get(business_type, BUSINESS_TYPE_CONTEXT['general'])}
 
-Important: The H1 tells you the current page topic. Use it to write a description that accurately reflects the page content and stands out from similar pages on the same site."""
+Section purpose: {section['purpose']}
+Word count target: {wc_min} to {wc_max} words. Stay within this range.
+{keyword_instruction}
+{heading_instruction}
 
+Section-specific rules:
+{section['prompt_rules']}
 
+Hard rules for all output:
+- Never use em dashes (use a comma or rewrite the sentence)
+- No exclamation marks
+- No generic AI openings like 'In today's world' or 'Great question'
+- No fluff. Every sentence must add information or move the argument forward
+- Brand name must appear exactly as: {brand_name}
+- Return only the section copy. No preamble, no notes, no explanations.
+{paa_block}{ai_overview_block}{competitor_block}{existing_block}{brief_block}{prev_block}"""
 
-H1_PROMPT = """You are a senior SEO copywriter. Write an optimised H1 tag for the following page.
-
-Hard rules:
-- No hard character limit but aim for under 70 characters
-- Include the target keyword naturally, ideally near the start
-- Do NOT include the brand name (H1 is on-page copy, brand is not needed)
-- No all-caps, excessive punctuation, or clickbait
-- Never use em dashes (—) anywhere in the output
-- Do not duplicate the title tag word for word — the H1 should be distinct
-- Return ONLY the H1 text. No explanation, no quotes, no extra text.
-
-Business context:
-- Business type: {business_type}
-- Target buyer: {buyer}
-- Buyer intent: {intent}
-- Recommended tone: {tone}
-- Avoid: {avoid}
-
-Page details:
-- URL: {url}
-- Page type: {page_type}
-- Target keyword: {keyword}
-- Current H1 (use as reference to improve on, not to copy): {h1}
-- Forbidden phrases: {forbidden_phrases}
-- Additional context: {context}
-
-Important: The current H1 shows what topic the page covers. Your job is to improve it by making it more specific, keyword-focused, and aligned with what the target buyer is searching for. Do not produce the same H1 unless it is already optimal."""
-
-def _build_prompt(template: str, url: str, keyword: str, page_type: str,
-                  brand_name: str, forbidden_phrases: str, context: str,
-                  business_type: str = "general", h1: str = "") -> str:
-    btype = business_type.lower().strip()
-    bcontext = BUSINESS_TYPE_CONTEXT.get(btype, BUSINESS_TYPE_CONTEXT["general"])
-    return template.format(
-        url=url,
-        keyword=keyword,
-        page_type=page_type,
-        brand_name=brand_name or "N/A",
-        forbidden_phrases=forbidden_phrases or "None",
-        context=context or "None",
-        h1=h1 or "Not provided",
-        business_type=btype,
-        buyer=bcontext["buyer"],
-        intent=bcontext["intent"],
-        tone=bcontext["tone"],
-        cta_examples=bcontext["cta_examples"],
-        avoid=bcontext["avoid"],
-        title_pattern=bcontext["title_pattern"],
-        desc_pattern=bcontext["desc_pattern"]
-    )
+    return prompt.strip()
 
 
-# ── Claude ────────────────────────────────────────────────────────────────────
-def generate_copy_claude(api_key: str, url: str, keyword: str, page_type: str = "general",
-                         brand_name: str = "", forbidden_phrases: str = "", context: str = "",
-                         business_type: str = "general", h1: str = "") -> dict:
+# ── Provider functions ────────────────────────────────────────────────────────
+
+def _call_claude(api_key: str, prompt: str) -> str:
+    import anthropic
     client = anthropic.Anthropic(api_key=api_key)
-
-    def call(template):
-        msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=256,
-            messages=[{"role": "user", "content": _build_prompt(template, url, keyword, page_type, brand_name, forbidden_phrases, context, business_type, h1)}]
-        )
-        return msg.content[0].text.strip()
-
-    return {"title": _sanitise(call(TITLE_PROMPT), brand_name), "description": _sanitise(call(DESCRIPTION_PROMPT), brand_name), "h1_optimised": _sanitise(call(H1_PROMPT))}
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
 
 
-# ── OpenAI ────────────────────────────────────────────────────────────────────
-def generate_copy_openai(api_key: str, url: str, keyword: str, page_type: str = "general",
-                         brand_name: str = "", forbidden_phrases: str = "", context: str = "",
-                         business_type: str = "general", h1: str = "") -> dict:
-    client = openai.OpenAI(api_key=api_key)
-
-    def call(template):
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=256,
-            messages=[{"role": "user", "content": _build_prompt(template, url, keyword, page_type, brand_name, forbidden_phrases, context, business_type, h1)}]
-        )
-        return resp.choices[0].message.content.strip()
-
-    return {"title": _sanitise(call(TITLE_PROMPT), brand_name), "description": _sanitise(call(DESCRIPTION_PROMPT), brand_name), "h1_optimised": _sanitise(call(H1_PROMPT))}
+def _call_openai(api_key: str, prompt: str) -> str:
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1500,
+    )
+    return resp.choices[0].message.content.strip()
 
 
-# ── Gemini ────────────────────────────────────────────────────────────────────
-def generate_copy_gemini(api_key: str, url: str, keyword: str, page_type: str = "general",
-                         brand_name: str = "", forbidden_phrases: str = "", context: str = "",
-                         business_type: str = "general", h1: str = "") -> dict:
-    client = google_genai.Client(api_key=api_key)
-
-    def call(template):
-        resp = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=_build_prompt(template, url, keyword, page_type, brand_name, forbidden_phrases, context, business_type, h1)
-        )
-        return resp.text.strip()
-
-    return {"title": _sanitise(call(TITLE_PROMPT), brand_name), "description": _sanitise(call(DESCRIPTION_PROMPT), brand_name), "h1_optimised": _sanitise(call(H1_PROMPT))}
+def _call_gemini(api_key: str, prompt: str) -> str:
+    from google import genai
+    client = genai.Client(api_key=api_key)
+    resp = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
+    return resp.text.strip()
 
 
-# ── Mistral ───────────────────────────────────────────────────────────────────
-def generate_copy_mistral(api_key: str, url: str, keyword: str, page_type: str = "general",
-                          brand_name: str = "", forbidden_phrases: str = "", context: str = "",
-                          business_type: str = "general", h1: str = "") -> dict:
+def _call_mistral(api_key: str, prompt: str) -> str:
+    from mistralai import Mistral
     client = Mistral(api_key=api_key)
-
-    def call(template):
-        resp = client.chat.complete(
-            model="mistral-small-latest",
-            max_tokens=256,
-            messages=[{"role": "user", "content": _build_prompt(template, url, keyword, page_type, brand_name, forbidden_phrases, context, business_type, h1)}]
-        )
-        return resp.choices[0].message.content.strip()
-
-    return {"title": _sanitise(call(TITLE_PROMPT), brand_name), "description": _sanitise(call(DESCRIPTION_PROMPT), brand_name), "h1_optimised": _sanitise(call(H1_PROMPT))}
+    resp = client.chat.complete(
+        model="mistral-small-latest",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.choices[0].message.content.strip()
 
 
-# ── Groq ──────────────────────────────────────────────────────────────────────
-def generate_copy_groq(api_key: str, url: str, keyword: str, page_type: str = "general",
-                       brand_name: str = "", forbidden_phrases: str = "", context: str = "",
-                       business_type: str = "general", h1: str = "") -> dict:
+def _call_groq(api_key: str, prompt: str) -> str:
+    from groq import Groq
     client = Groq(api_key=api_key)
-
-    def call(template):
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            max_tokens=256,
-            messages=[{"role": "user", "content": _build_prompt(template, url, keyword, page_type, brand_name, forbidden_phrases, context, business_type, h1)}]
-        )
-        return resp.choices[0].message.content.strip()
-
-    return {"title": _sanitise(call(TITLE_PROMPT), brand_name), "description": _sanitise(call(DESCRIPTION_PROMPT), brand_name), "h1_optimised": _sanitise(call(H1_PROMPT))}
+    resp = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1500,
+    )
+    return resp.choices[0].message.content.strip()
 
 
-# ── Router ────────────────────────────────────────────────────────────────────
-PROVIDERS = {
-    "Claude": generate_copy_claude,
-    "OpenAI": generate_copy_openai,
-    "Gemini (free)": generate_copy_gemini,
-    "Mistral (free tier)": generate_copy_mistral,
-    "Groq (free tier)": generate_copy_groq,
+PROVIDER_FN = {
+    "Claude": _call_claude,
+    "OpenAI": _call_openai,
+    "Gemini": _call_gemini,
+    "Mistral": _call_mistral,
+    "Groq": _call_groq,
 }
 
-def generate_copy(provider: str, api_key: str, **kwargs) -> dict:
-    fn = PROVIDERS.get(provider)
+PROVIDER_DELAY = {
+    "Claude": 0.5,
+    "OpenAI": 0.5,
+    "Gemini": 5.0,
+    "Mistral": 2.0,
+    "Groq": 2.0,
+}
+
+
+# ── Section loop ──────────────────────────────────────────────────────────────
+
+def generate_page(
+    template: dict,
+    keyword_assignment: dict,
+    lsi_keywords: dict,
+    business_type: str,
+    brand_name: str,
+    h1: str,
+    page_type: str,
+    paa_questions: list,
+    ai_overview: str,
+    competitor_section_map: dict,
+    client_brief: str,
+    client_existing_content: str,
+    provider: str,
+    api_key: str,
+    progress_callback=None,
+) -> dict:
+    """
+    Runs the section-by-section generation loop.
+    Returns: { section_name: text, "_full_page": assembled markdown, "_word_count": int }
+    """
+    fn = PROVIDER_FN.get(provider)
     if not fn:
         raise ValueError(f"Unknown provider: {provider}")
-    return fn(api_key, **kwargs)
+
+    delay = PROVIDER_DELAY.get(provider, 1.0)
+    sections = template.get("sections", [])
+    results = {}
+    previous_text = ""
+
+    for i, section in enumerate(sections):
+        if progress_callback:
+            progress_callback(i, len(sections), section["label"])
+
+        kw_slot = section.get("keyword_slot", "none")
+        sec_name = section["name"]
+        assignment = keyword_assignment.get(sec_name, {})
+        primary_kw = assignment.get("primary", "")
+        supporting_kw = assignment.get("supporting", "")
+        lsi_kws = lsi_keywords.get(supporting_kw or primary_kw, [])
+        comp_excerpts = competitor_section_map.get(sec_name, [])
+
+        prompt = _build_section_prompt(
+            section=section,
+            primary_keyword=primary_kw,
+            supporting_keyword=supporting_kw,
+            lsi_keywords=lsi_kws,
+            business_type=business_type,
+            brand_name=brand_name,
+            h1=h1,
+            page_type=page_type,
+            paa_questions=paa_questions if sec_name == "faq" else [],
+            competitor_excerpts=comp_excerpts,
+            client_brief=client_brief,
+            previous_section_text=previous_text,
+            client_existing_content=client_existing_content if i == 0 else "",
+        )
+
+        try:
+            raw = fn(api_key, prompt)
+            text = sanitise(raw, brand_name)
+        except Exception as e:
+            text = f"[ERROR generating section '{section['label']}': {e}]"
+
+        results[sec_name] = text
+        previous_text = text
+
+        if i < len(sections) - 1:
+            time.sleep(delay)
+
+    full_page = "\n\n".join(results.get(s["name"], "") for s in sections)
+    word_count = len(full_page.split())
+
+    results["_full_page"] = full_page
+    results["_word_count"] = word_count
+
+    return results
