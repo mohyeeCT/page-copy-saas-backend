@@ -103,6 +103,9 @@ def _process_single_row(
     min_volume   = settings.get("min_volume", 10)
     location_code = settings.get("location_code", 2840)
     client_brief = settings.get("client_brief", "")
+    include_brand = settings.get("include_brand", True)
+    forbidden_phrases = settings.get("forbidden_phrases", "")
+    effective_brand = brand_name if include_brand else ""
     _niche_ctx = get_niche_context(settings.get("niche", ""))
     if _niche_ctx:
         client_brief = (client_brief + "\n\n" + _niche_ctx).strip()
@@ -274,7 +277,7 @@ def _process_single_row(
             keyword_assignment=kw_assignment,
             lsi_keywords=lsi_map,
             business_type=business_type,
-            brand_name=brand_name,
+            brand_name=effective_brand,
             h1=h1,
             page_type=page_type,
             paa_questions=paa_questions,
@@ -285,6 +288,7 @@ def _process_single_row(
             provider=provider,
             api_key=api_key,
             progress_callback=on_section,
+            forbidden_phrases=forbidden_phrases,
         )
     except InterruptedError:
         raise
@@ -432,6 +436,8 @@ class PageCopySettings(BaseModel):
     brand_name: str = ""
     full_brand_name: str = ""
     branded_terms_input: str = ""
+    include_brand: bool = True
+    forbidden_phrases: str = ""
     location_code: int = 2840
     min_volume: int = 10
     page_type: str = "blog"
