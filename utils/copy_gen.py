@@ -68,6 +68,7 @@ def _build_section_prompt(
     previous_section_text: str,
     client_existing_content: str,
     ai_overview: str = "",
+    forbidden_phrases: str = "",
 ) -> str:
     kw_slot = section.get("keyword_slot", "none")
     wc_min, wc_max = section.get("word_count", [150, 250])
@@ -140,6 +141,7 @@ Hard rules for all output:
 - No generic AI openings like 'In today's world' or 'Great question'
 - No fluff. Every sentence must add information or move the argument forward
 - Brand name must appear exactly as: {brand_name}
+{f"- Never use these phrases: {forbidden_phrases}" if forbidden_phrases and forbidden_phrases.strip() else ""}
 - Return only the section copy. No preamble, no notes, no explanations.
 {paa_block}{ai_overview_block}{competitor_block}{existing_block}{brief_block}{prev_block}"""
 
@@ -236,6 +238,7 @@ def generate_page(
     provider: str,
     api_key: str,
     progress_callback=None,
+    forbidden_phrases: str = "",
 ) -> dict:
     """
     Runs the section-by-section generation loop.
@@ -276,6 +279,7 @@ def generate_page(
             client_brief=client_brief,
             previous_section_text=previous_text,
             client_existing_content=client_existing_content if i == 0 else "",
+            forbidden_phrases=forbidden_phrases,
         )
 
         try:
