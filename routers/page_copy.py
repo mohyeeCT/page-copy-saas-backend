@@ -142,12 +142,12 @@ def _process_single_row(
         step("fetching keyword volumes...")
         try:
             vol_map = get_search_volume(all_kws, dfs_login, dfs_password, int(location_code))
-        except Exception:
-            pass
+        except Exception as e:
+            step("DataForSEO keyword volume failed: " + str(e)[:120])
         try:
             diff_map = get_keyword_difficulty(all_kws, dfs_login, dfs_password, int(location_code))
-        except Exception:
-            pass
+        except Exception as e:
+            step("DataForSEO keyword difficulty failed: " + str(e)[:120])
 
     pool   = merge_keyword_pools([], dfs_ranked, manual_kws, vol_map, diff_map)
     pool   = [k for k in pool if k.get("volume", 0) >= min_volume]
@@ -178,6 +178,8 @@ def _process_single_row(
     serp_data = {"organic": [], "paa": [], "ai_overview": ""}
     try:
         serp_data = get_serp_data(dfs_login, dfs_password, primary_keyword, int(location_code))
+        if serp_data.get("error"):
+            step("DataForSEO SERP failed: " + str(serp_data["error"])[:120])
         ao_present = bool(serp_data.get("ai_overview"))
         paa_count  = len(serp_data.get("paa_items") or serp_data.get("paa") or [])
         org_count  = len(serp_data.get("organic") or [])
@@ -209,8 +211,9 @@ def _process_single_row(
         try:
             ideas = get_keyword_ideas(sk, dfs_login, dfs_password, int(location_code), limit=10)
             lsi_map[sk] = [i["keyword"] for i in ideas[:3]]
-        except Exception:
+        except Exception as e:
             lsi_map[sk] = []
+            step("DataForSEO keyword ideas failed: " + str(e)[:120])
 
     # ── Competitor scraping ────────────────────────────────────────────────
     step("scraping competitors...")
