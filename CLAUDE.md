@@ -101,3 +101,23 @@ the last 600 chars of all preceding sections in template order.
 - Template key must be stored per-row (rows[i].template_key) as well as in
   settings, because settings may change between reruns.
 - .docx generation uses python-docx — must be in requirements.txt.
+
+
+## Local Dev Setup
+
+Tests require FastAPI and all backend dependencies. Without a venv, `pytest`
+will fail on collection with `ModuleNotFoundError: No module named 'fastapi'`.
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r requirements.txt pytest
+python -m pytest tests/ -v
+```
+
+CI (GitHub Actions) installs dependencies automatically — this setup is only
+needed for local test runs.
