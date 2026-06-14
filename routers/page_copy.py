@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from auth import get_current_user, get_supabase
+from credentials import hydrate_job_settings, strip_secret_fields
 from utils.dfs import (
     get_search_volume, get_keyword_difficulty,
     get_ranked_keywords_for_url, get_keyword_ideas,
@@ -464,6 +465,9 @@ def run_page_copy_job(
     sb=Depends(get_supabase),
 ):
     job_id = str(uuid.uuid4())
+    runtime_settings = hydrate_job_settings(sb, user.id, request.settings.model_dump())
+    if not runtime_settings.get("api_key") or not runtime_settings.get("dfs_password"):
+        raise HTTPException(status_code=400, detail="Saved provider credentials are incomplete. Update Settings and try again.")
 
     # Fetch brand profile
     brand_profile = None
@@ -487,7 +491,7 @@ def run_page_copy_job(
         "results":        [],
         "logs":           [],
         "rows":           [r.model_dump() for r in request.rows],
-        "settings":       request.settings.model_dump(exclude={"api_key", "dfs_password"}),
+        "settings":       strip_secret_fields(request.settings.model_dump()),
         "current_step":   "Queued...",
     }).execute()
 
@@ -495,7 +499,7 @@ def run_page_copy_job(
         _process_job,
         job_id=job_id,
         rows=[r.model_dump() for r in request.rows],
-        settings=request.settings.model_dump(),
+        settings=runtime_settings,
         brand_profile=brand_profile,
     )
 
