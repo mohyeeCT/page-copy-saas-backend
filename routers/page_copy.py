@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from auth import get_current_user, get_supabase
+from abuse_protection import enforce_job_start, execute_active_job_write
 from credentials import hydrate_job_settings, strip_secret_fields
 from utils.dfs import (
     get_search_volume, get_keyword_difficulty,
@@ -465,6 +466,7 @@ def run_page_copy_job(
     sb=Depends(get_supabase),
 ):
     job_id = str(uuid.uuid4())
+    enforce_job_start(sb, user.id, "page-copy", len(request.rows), 50)
     runtime_settings = hydrate_job_settings(sb, user.id, request.settings.model_dump())
     if not runtime_settings.get("api_key") or not runtime_settings.get("dfs_password"):
         raise HTTPException(status_code=400, detail="Saved provider credentials are incomplete. Update Settings and try again.")
@@ -479,7 +481,7 @@ def run_page_copy_job(
         except Exception:
             pass
 
-    sb.table("jobs").insert({
+    execute_active_job_write(lambda: sb.table("jobs").insert({
         "id":             job_id,
         "user_id":        user.id,
         "name":           request.name or f"Page copy — {len(request.rows)} URLs",
@@ -493,7 +495,7 @@ def run_page_copy_job(
         "rows":           [r.model_dump() for r in request.rows],
         "settings":       strip_secret_fields(request.settings.model_dump()),
         "current_step":   "Queued...",
-    }).execute()
+    }).execute(), "page-copy")
 
     background_tasks.add_task(
         _process_job,
