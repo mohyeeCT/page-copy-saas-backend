@@ -40,7 +40,7 @@ _RATE_LIMITS = {
 def _is_cancelled(sb, job_id: str) -> bool:
     try:
         res = sb.table("jobs").select("status").eq("id", job_id).execute()
-        return res.data and res.data[0].get("status") == "cancelling"
+        return bool(res.data and res.data[0].get("status") in {"cancelling", "cancelled"})
     except Exception:
         return False
 
