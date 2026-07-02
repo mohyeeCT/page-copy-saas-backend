@@ -6,8 +6,12 @@ See `../CLAUDE.md` for full platform context, conventions, and working rules.
 
 FastAPI backend for the Page Copy workflow. Generates full-page copy
 section by section using a template system.
-Deployed on Railway EU West. Default branch: `main`. Current HEAD: `5cba1f6`.
+Deployed on Railway EU West. Default branch: `main`. Current HEAD: `f840f4b`.
 Runtime: Python 3.12.
+
+Standalone Page Copy is hidden/legacy in CopyPilot. Keep this backend available
+for old jobs and direct links, but do not do normal feature work here unless
+the user explicitly asks. Page-copy improvements usually belong in All in One.
 
 Railway URL: `https://page-copy-saas-backend-production.up.railway.app`
 
@@ -94,6 +98,8 @@ the last 600 chars of all preceding sections in template order.
 
 ## Known Gotchas
 
+- Hidden/legacy status is intentional. Do not add Page Copy back to primary
+  navigation or normal smoke-test scope unless explicitly requested.
 - competitor_section_map is built at runtime and is NOT stored in results.
   Section reruns (in AiO) skip competitor excerpts for this reason.
 - keyword_assignment is also not stored — section reruns use primary keyword
